@@ -17,3 +17,4 @@ dev_dependencies:
 executables:
   flutter_l10n_automator: flutter_l10n_automator
   cleanup: cleanup
+  l10n_undo: undo
