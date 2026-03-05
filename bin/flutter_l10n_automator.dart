@@ -115,15 +115,13 @@ class L10nAutomator {
         } else {
           key = _generateKey(stringInfo.text);
           newEntries[key] = stringInfo.text;
-          final constMarker = stringInfo.isConst ? ' [CONST]' : '';
-          print('   ➕ New: $key = \'${_truncate(stringInfo.text, 50)}\'$constMarker');
+          print('   ➕ New: $key = \'${_truncate(stringInfo.text, 50)}\'');
         }
 
         replacements.add(StringReplacement(
           text: stringInfo.text,
           originalMatch: stringInfo.originalMatch,
           key: key,
-          isConst: stringInfo.isConst,
         ));
       }
 
@@ -172,17 +170,16 @@ class L10nAutomator {
     final results = <File, List<StringInfo>>{};
     final libDir = Directory(path.join(projectRoot, 'lib'));
 
-    final dartFiles = Glob('**/*.dart')
-        .listSync(root: libDir.path)
-        .whereType<File>()
-        .where((f) =>
-            !f.path.contains('.g.dart') && !f.path.contains('generated'));
-
-    for (final dartFile in dartFiles) {
-      final strings = await _extractStringsFromFile(dartFile);
-      if (strings.isNotEmpty) {
-        results[dartFile] = strings;
-        print('📄 ${path.relative(dartFile.path, from: projectRoot)}: ${strings.length} strings');
+    await for (final entity in Glob('**/*.dart').list(root: libDir.path)) {
+      if (entity is File) {
+        final filePath = entity.path;
+        if (!filePath.contains('.g.dart') && !filePath.contains('generated')) {
+          final strings = await _extractStringsFromFile(entity);
+          if (strings.isNotEmpty) {
+            results[entity] = strings;
+            print('📄 ${path.relative(entity.path, from: projectRoot)}: ${strings.length} strings');
+          }
+        }
       }
     }
 
@@ -199,19 +196,19 @@ class L10nAutomator {
       return found;
     }
 
-    // Patterns to detect hardcoded strings
+    // Patterns to detect hardcoded strings - Fixed regex
     final patterns = [
-      RegExp(r"Text\s*\(\s*['\"]([^'\"]+)['\"]\s*[,\)]"),
-      RegExp(r"title\s*:\s*Text\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
-      RegExp(r"hintText\s*:\s*['\"]([^'\"]+)['\"]"),
-      RegExp(r"labelText\s*:\s*['\"]([^'\"]+)['\"]"),
-      RegExp(
-          r"(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['\"]([^'\"]+)['\"]"),
+      RegExp(r'''Text\s*\(\s*['"]([^'"]+)['"]\s*[,\)]'''),
+      RegExp(r'''title\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]\s*\)'''),
+      RegExp(r'''hintText\s*:\s*['"]([^'"]+)['"]'''),
+      RegExp(r'''labelText\s*:\s*['"]([^'"]+)['"]'''),
+      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]'''),
     ];
 
     for (final pattern in patterns) {
       for (final match in pattern.allMatches(content)) {
-        final text = match.group(1)!;
+        final text = match.group(1);
+        if (text == null) continue;
 
         // Skip if already localized or invalid
         if (text.startsWith('AppLocalizations') ||
@@ -222,23 +219,14 @@ class L10nAutomator {
           continue;
         }
 
-        final isConst = _isInConstContext(content, match.start);
         found.add(StringInfo(
           text: text,
           originalMatch: match.group(0)!,
-          isConst: isConst,
         ));
       }
     }
 
     return found;
-  }
-
-  bool _isInConstContext(String content, int position) {
-    final lookBack = content.substring(
-        position > 200 ? position - 200 : 0, position);
-    return lookBack.contains(RegExp(r'\bconst\s+\w+\s*\(')) ||
-        lookBack.contains(RegExp(r'\bconst\s*\['));
   }
 
   String _generateKey(String text) {
@@ -289,21 +277,6 @@ class L10nAutomator {
     // Replace strings
     for (final replacement in replacements) {
       final localized = '$varName!.${replacement.key}';
-
-      // Remove const if needed
-      if (replacement.isConst) {
-        final matchPos = content.lastIndexOf(replacement.originalMatch);
-        final lookBackStart = matchPos > 100 ? matchPos - 100 : 0;
-        final lookBack = content.substring(lookBackStart, matchPos);
-
-        final constMatch = RegExp(r'\bconst\s+(\w+\s*\()').firstMatch(lookBack);
-        if (constMatch != null) {
-          final constPos = lookBackStart + constMatch.start;
-          content = content.substring(0, constPos) +
-              content.substring(constPos).replaceFirst('const ', '');
-        }
-      }
-
       final newMatch = replacement.originalMatch
           .replaceAll('"${replacement.text}"', localized)
           .replaceAll("'${replacement.text}'", localized);
@@ -401,12 +374,10 @@ class L10nAutomator {
 class StringInfo {
   final String text;
   final String originalMatch;
-  final bool isConst;
 
   StringInfo({
     required this.text,
     required this.originalMatch,
-    required this.isConst,
   });
 }
 
@@ -414,12 +385,10 @@ class StringReplacement {
   final String text;
   final String originalMatch;
   final String key;
-  final bool isConst;
 
   StringReplacement({
     required this.text,
     required this.originalMatch,
     required this.key,
-    required this.isConst,
   });
 }
