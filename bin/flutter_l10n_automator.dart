@@ -15,6 +15,8 @@ void main(List<String> arguments) async {
     ..addOption('import-path',
         defaultsTo: 'l10n/app_localizations.dart',
         help: 'Import path for AppLocalizations')
+    ..addOption('path',
+        abbr: 'p', help: 'Specific file or directory to process (e.g., lib/pages or lib/pages/home.dart)')
     ..addFlag('help', abbr: 'h', negatable: false, help: 'Show usage');
 
   try {
@@ -30,6 +32,7 @@ void main(List<String> arguments) async {
       arbDir: results['arb-dir'] as String,
       importPath: results['import-path'] as String,
       dryRun: results['dry-run'] as bool,
+      specificPath: results['path'] as String?,
     );
 
     await automator.run();
@@ -45,9 +48,18 @@ void _printHelp(ArgParser parser) {
   print('Usage: dart run flutter_l10n_automator [options]\n');
   print('Options:');
   print(parser.usage);
-  print('\nExample:');
+  print('\nExamples:');
+  print('  # Process entire project');
   print('  dart run flutter_l10n_automator');
-  print('  dart run flutter_l10n_automator --dry-run');
+  print('');
+  print('  # Process specific directory');
+  print('  dart run flutter_l10n_automator --path lib/pages');
+  print('');
+  print('  # Process specific file');
+  print('  dart run flutter_l10n_automator --path lib/pages/home_page.dart');
+  print('');
+  print('  # Dry run with specific path');
+  print('  dart run flutter_l10n_automator --dry-run --path lib/widgets');
 }
 
 class L10nAutomator {
@@ -55,6 +67,7 @@ class L10nAutomator {
   final String arbDir;
   final String importPath;
   final bool dryRun;
+  final String? specificPath;
 
   final Map<String, String> existingKeys = {};
   final Map<String, String> existingValues = {};
@@ -65,6 +78,7 @@ class L10nAutomator {
     required this.arbDir,
     required this.importPath,
     required this.dryRun,
+    this.specificPath,
   });
 
   Future<void> run() async {
@@ -210,10 +224,41 @@ class L10nAutomator {
 
   Future<Map<File, List<StringInfo>>> _scanProject() async {
     final results = <File, List<StringInfo>>{};
-    final libDir = Directory(path.join(projectRoot, 'lib'));
+    
+    // Determine scan directory
+    final Directory scanDir;
+    if (specificPath != null) {
+      final targetPath = path.join(projectRoot, specificPath!);
+      final target = FileSystemEntity.typeSync(targetPath);
+      
+      if (target == FileSystemEntityType.notFound) {
+        print('❌ Error: Path not found: $specificPath');
+        return results;
+      }
+      
+      if (target == FileSystemEntityType.file) {
+        // Process single file
+        final file = File(targetPath);
+        if (file.path.endsWith('.dart')) {
+          print('📄 Processing single file: ${path.relative(file.path, from: projectRoot)}\n');
+          final strings = await _extractStringsFromFile(file);
+          if (strings.isNotEmpty) {
+            results[file] = strings;
+            print('📄 ${path.relative(file.path, from: projectRoot)}: ${strings.length} strings');
+          }
+        }
+        return results;
+      }
+      
+      scanDir = Directory(targetPath);
+      print('📂 Processing directory: ${path.relative(scanDir.path, from: projectRoot)}\n');
+    } else {
+      scanDir = Directory(path.join(projectRoot, 'lib'));
+      print('📂 Processing entire lib directory\n');
+    }
 
-    if (!await libDir.exists()) {
-      print('❌ Error: lib directory not found');
+    if (!await scanDir.exists()) {
+      print('❌ Error: Directory not found: ${scanDir.path}');
       return results;
     }
 
@@ -237,7 +282,7 @@ class L10nAutomator {
       'generated',
     ];
 
-    await for (final entity in libDir.list(recursive: true, followLinks: false)) {
+    await for (final entity in scanDir.list(recursive: true, followLinks: false)) {
       if (entity is File && entity.path.endsWith('.dart')) {
         final filePath = entity.path.toLowerCase();
         
