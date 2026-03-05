@@ -239,21 +239,40 @@ class L10nAutomator {
       return found;
     }
 
-    // Patterns to detect hardcoded strings
+    // Patterns to detect hardcoded strings - [^'"$]+ excludes $ to avoid interpolation
     final patterns = [
-      RegExp(r'''Text\s*\(\s*['"]([^'"]+)['"]\s*[,\)]'''),
-      RegExp(r'''title\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]\s*\)'''),
-      RegExp(r'''hintText\s*:\s*['"]([^'"]+)['"]'''),
-      RegExp(r'''labelText\s*:\s*['"]([^'"]+)['"]'''),
-      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]'''),
+      RegExp(r'''Text\s*\(\s*['"]([^'"$]+)['"]\s*[,\)]'''),
+      RegExp(r'''title\s*:\s*Text\s*\(\s*['"]([^'"$]+)['"]\s*\)'''),
+      RegExp(r'''hintText\s*:\s*['"]([^'"$]+)['"]'''),
+      RegExp(r'''labelText\s*:\s*['"]([^'"$]+)['"]'''),
+      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"$]+)['"]'''),
     ];
 
     for (final pattern in patterns) {
       for (final match in pattern.allMatches(content)) {
         final text = match.group(1);
+        final fullMatch = match.group(0)!;
+        
         if (text == null) continue;
 
-        // CRITICAL: Skip strings with interpolation
+        // CRITICAL: Skip if the full match context contains interpolation or AppLocalizations
+        // Check the surrounding context (100 chars before and after)
+        final matchStart = match.start;
+        final matchEnd = match.end;
+        final contextStart = matchStart > 100 ? matchStart - 100 : 0;
+        final contextEnd = matchEnd + 100 < content.length ? matchEnd + 100 : content.length;
+        final surroundingContext = content.substring(contextStart, contextEnd);
+        
+        // Skip if context shows this is part of interpolation or already localized
+        if (surroundingContext.contains(r'${') || 
+            surroundingContext.contains('AppLocalizations') ||
+            surroundingContext.contains('l10n!.') ||
+            surroundingContext.contains('l10n?.')) {
+          print('   ⏭️  Skipping (interpolation/localized): ${_truncate(text, 50)}');
+          continue;
+        }
+
+        // Skip strings with $ character (interpolation marker)
         if (text.contains(r'$')) {
           print('   ⏭️  Skipping interpolated string: ${_truncate(text, 50)}');
           continue;
@@ -262,6 +281,7 @@ class L10nAutomator {
         // Skip if already localized or invalid
         if (text.startsWith('AppLocalizations') ||
             text.startsWith('S.of') ||
+            text.startsWith('l10n') ||
             text.length < 2 ||
             text.trim().isEmpty ||
             RegExp(r'^[a-z_]+$').hasMatch(text)) {
@@ -270,7 +290,7 @@ class L10nAutomator {
 
         found.add(StringInfo(
           text: text,
-          originalMatch: match.group(0)!,
+          originalMatch: fullMatch,
         ));
       }
     }
