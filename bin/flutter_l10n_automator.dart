@@ -269,17 +269,15 @@ class L10nAutomator {
 
     // Patterns to detect hardcoded strings - [^'"$]+ excludes $ to avoid interpolation
     final patterns = [
-      RegExp(r'''Text\s*\(\s*['"]([^'"$]+)['"]\s*[,\)]'''),
-      RegExp(r'''title\s*:\s*Text\s*\(\s*['"]([^'"$]+)['"]\s*\)'''),
+      // Null coalescing FIRST (highest priority) - catch ?? 'value' anywhere
+      RegExp(r'''\?\?\s*['"]([^'"$]+)['"]'''),
+      // Text widget patterns (including const Text)
+      RegExp(r'''(?:const\s+)?Text\s*\(\s*['"]([^'"$]+)['"]\s*[,\)]'''),
+      RegExp(r'''title\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$]+)['"]\s*\)'''),
+      RegExp(r'''child\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$]+)['"]\s*[,\)]'''),
       RegExp(r'''hintText\s*:\s*['"]([^'"$]+)['"]'''),
       RegExp(r'''labelText\s*:\s*['"]([^'"$]+)['"]'''),
-      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"$]+)['"]'''),
-      // Null coalescing operator: something ?? 'fallback'
-      RegExp(r'''\?\?\s*['"]([^'"$]+)['"]'''),
-      // Ternary operator: condition ? 'value' : other
-      RegExp(r'''\?\s*['"]([^'"$]+)['"]\s*:'''),
-      // Ternary operator: condition : 'value'
-      RegExp(r''':\s*['"]([^'"$]+)['"]\s*[,\);]'''),
+      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$]+)['"]'''),
     ];
 
     for (final pattern in patterns) {
