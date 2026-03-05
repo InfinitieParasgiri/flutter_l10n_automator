@@ -4,17 +4,25 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:args/args.dart';
 import 'package:path/path.dart' as path;
-import 'package:glob/glob.dart';
 
 void main(List<String> arguments) async {
   final parser = ArgParser()
-    ..addFlag('dry-run',
-        abbr: 'd', negatable: false, help: 'Preview changes without modifying files')
-    ..addOption('arb-dir',
-        defaultsTo: 'lib/l10n', help: 'Directory containing .arb files')
-    ..addOption('import-path',
-        defaultsTo: 'l10n/app_localizations.dart',
-        help: 'Import path for AppLocalizations')
+    ..addFlag(
+      'dry-run',
+      abbr: 'd',
+      negatable: false,
+      help: 'Preview changes without modifying files',
+    )
+    ..addOption(
+      'arb-dir',
+      defaultsTo: 'lib/l10n',
+      help: 'Directory containing .arb files',
+    )
+    ..addOption(
+      'import-path',
+      defaultsTo: 'l10n/app_localizations.dart',
+      help: 'Import path for AppLocalizations',
+    )
     ..addFlag('help', abbr: 'h', negatable: false, help: 'Show usage');
 
   try {
@@ -89,14 +97,20 @@ class L10nAutomator {
     final scanResults = await _scanProject();
 
     if (scanResults.isEmpty) {
-      print('\n✨ No hardcoded strings found! Your project is already localized.');
+      print(
+        '\n✨ No hardcoded strings found! Your project is already localized.',
+      );
       return;
     }
 
     print('\n${'=' * 50}');
-    final totalStrings =
-        scanResults.values.fold(0, (sum, list) => sum + list.length);
-    print('📊 Found $totalStrings total strings in ${scanResults.length} files\n');
+    final totalStrings = scanResults.values.fold(
+      0,
+      (sum, list) => sum + list.length,
+    );
+    print(
+      '📊 Found $totalStrings total strings in ${scanResults.length} files\n',
+    );
 
     print('🔧 Processing strings...\n');
 
@@ -111,18 +125,22 @@ class L10nAutomator {
         String key;
         if (existingValues.containsKey(stringInfo.text)) {
           key = existingValues[stringInfo.text]!;
-          print('   ♻️  Reusing key: $key for \'${_truncate(stringInfo.text, 50)}\'');
+          print(
+            '   ♻️  Reusing key: $key for \'${_truncate(stringInfo.text, 50)}\'',
+          );
         } else {
           key = _generateKey(stringInfo.text);
           newEntries[key] = stringInfo.text;
           print('   ➕ New: $key = \'${_truncate(stringInfo.text, 50)}\'');
         }
 
-        replacements.add(StringReplacement(
-          text: stringInfo.text,
-          originalMatch: stringInfo.originalMatch,
-          key: key,
-        ));
+        replacements.add(
+          StringReplacement(
+            text: stringInfo.text,
+            originalMatch: stringInfo.originalMatch,
+            key: key,
+          ),
+        );
       }
 
       if (replacements.isNotEmpty) {
@@ -148,7 +166,9 @@ class L10nAutomator {
     print('📈 SUMMARY');
     print('   • Files processed: ${scanResults.length}');
     print('   • New keys added: ${newEntries.length}');
-    print('   • Total keys in .arb: ${existingKeys.length + newEntries.length}');
+    print(
+      '   • Total keys in .arb: ${existingKeys.length + newEntries.length}',
+    );
     print('=' * 50);
     print('\n✨ Done! Your Flutter app is now localized.');
     print('💡 Tip: Review the changes and test your app thoroughly.\n');
@@ -167,25 +187,29 @@ class L10nAutomator {
   }
 
   Future<Map<File, List<StringInfo>>> _scanProject() async {
-  final results = <File, List<StringInfo>>{};
-  final libDir = Directory(path.join(projectRoot, 'lib'));
+    final results = <File, List<StringInfo>>{};
+    final libDir = Directory(path.join(projectRoot, 'lib'));
 
-  final glob = Glob('**/*.dart');
-  await for (final entity in glob.list(root: libDir.path, followLinks: false)) {
-    if (entity is File) {
-      final filePath = entity.path;
-      if (!filePath.contains('.g.dart') && !filePath.contains('generated')) {
-        final strings = await _extractStringsFromFile(entity);
-        if (strings.isNotEmpty) {
-          results[entity] = strings;
-          print('📄 ${path.relative(entity.path, from: projectRoot)}: ${strings.length} strings');
+    await for (final entity in libDir.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is File && entity.path.endsWith('.dart')) {
+        final filePath = entity.path;
+        if (!filePath.contains('.g.dart') && !filePath.contains('generated')) {
+          final strings = await _extractStringsFromFile(entity);
+          if (strings.isNotEmpty) {
+            results[entity] = strings;
+            print(
+              '📄 ${path.relative(entity.path, from: projectRoot)}: ${strings.length} strings',
+            );
+          }
         }
       }
     }
-  }
 
-  return results;
-}
+    return results;
+  }
 
   Future<List<StringInfo>> _extractStringsFromFile(File dartFile) async {
     final content = await dartFile.readAsString();
@@ -203,7 +227,9 @@ class L10nAutomator {
       RegExp(r'''title\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]\s*\)'''),
       RegExp(r'''hintText\s*:\s*['"]([^'"]+)['"]'''),
       RegExp(r'''labelText\s*:\s*['"]([^'"]+)['"]'''),
-      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]'''),
+      RegExp(
+        r'''(?:ElevatedButton|TextButton|OutlinedButton)\s*\([^)]*child\s*:\s*Text\s*\(\s*['"]([^'"]+)['"]''',
+      ),
     ];
 
     for (final pattern in patterns) {
@@ -220,10 +246,7 @@ class L10nAutomator {
           continue;
         }
 
-        found.add(StringInfo(
-          text: text,
-          originalMatch: match.group(0)!,
-        ));
+        found.add(StringInfo(text: text, originalMatch: match.group(0)!));
       }
     }
 
@@ -245,7 +268,8 @@ class L10nAutomator {
     // Shorten if too long
     final words = key.split('_');
     if (words.length > 5 || key.length > 50) {
-      key = '${words.take(3).join('_')}_${text.hashCode.abs().toRadixString(16).substring(0, 6)}';
+      key =
+          '${words.take(3).join('_')}_${text.hashCode.abs().toRadixString(16).substring(0, 6)}';
     }
 
     // Ensure uniqueness
@@ -261,19 +285,25 @@ class L10nAutomator {
   }
 
   Future<void> _replaceStringsInFile(
-      File dartFile, List<StringReplacement> replacements) async {
+    File dartFile,
+    List<StringReplacement> replacements,
+  ) async {
     var content = await dartFile.readAsString();
     final originalContent = content;
 
     // Detect localization pattern
-    final varNameMatch = RegExp(r'final\s+(\w+)\s*=\s*AppLocalizations\.of\(context\)\s*;')
-        .firstMatch(content);
+    final varNameMatch = RegExp(
+      r'final\s+(\w+)\s*=\s*AppLocalizations\.of\(context\)\s*;',
+    ).firstMatch(content);
     final varName = varNameMatch?.group(1) ?? 'l10n';
     final hasDeclaration = varNameMatch != null;
 
     // Sort replacements by position (reverse)
-    replacements.sort((a, b) => content.lastIndexOf(b.originalMatch)
-        .compareTo(content.lastIndexOf(a.originalMatch)));
+    replacements.sort(
+      (a, b) => content
+          .lastIndexOf(b.originalMatch)
+          .compareTo(content.lastIndexOf(a.originalMatch)),
+    );
 
     // Replace strings
     for (final replacement in replacements) {
@@ -286,8 +316,9 @@ class L10nAutomator {
 
     // Add variable declaration if needed
     if (content != originalContent && !hasDeclaration) {
-      final buildMatch = RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+context\s*\)\s*\{')
-          .firstMatch(content);
+      final buildMatch = RegExp(
+        r'Widget\s+build\s*\(\s*BuildContext\s+context\s*\)\s*\{',
+      ).firstMatch(content);
 
       if (buildMatch != null) {
         var pos = buildMatch.end;
@@ -295,20 +326,24 @@ class L10nAutomator {
           pos++;
         }
 
-        final declaration = '\n    final $varName = AppLocalizations.of(context);\n';
-        content = content.substring(0, pos) + declaration + content.substring(pos);
+        final declaration =
+            '\n    final $varName = AppLocalizations.of(context);\n';
+        content =
+            content.substring(0, pos) + declaration + content.substring(pos);
       }
     }
 
     // Add import if needed
     if (content != originalContent && !content.contains(importPath)) {
       final importStatement = "import '$importPath';\n";
-      final lastImport = RegExp(r'^import\s+[^\n]+;$', multiLine: true)
-          .allMatches(content)
-          .lastOrNull;
+      final lastImport = RegExp(
+        r'^import\s+[^\n]+;$',
+        multiLine: true,
+      ).allMatches(content).lastOrNull;
 
       if (lastImport != null) {
-        content = content.substring(0, lastImport.end) +
+        content =
+            content.substring(0, lastImport.end) +
             '\n$importStatement' +
             content.substring(lastImport.end);
       } else {
@@ -319,9 +354,13 @@ class L10nAutomator {
     // Write file
     if (!dryRun) {
       await dartFile.writeAsString(content);
-      print('✅ Updated ${path.relative(dartFile.path, from: projectRoot)} (using $varName!.keyName)');
+      print(
+        '✅ Updated ${path.relative(dartFile.path, from: projectRoot)} (using $varName!.keyName)',
+      );
     } else {
-      print('🔍 [DRY RUN] Would update ${path.relative(dartFile.path, from: projectRoot)} (using $varName!.keyName)');
+      print(
+        '🔍 [DRY RUN] Would update ${path.relative(dartFile.path, from: projectRoot)} (using $varName!.keyName)',
+      );
     }
   }
 
@@ -337,19 +376,21 @@ class L10nAutomator {
     if (!dryRun) {
       final encoder = JsonEncoder.withIndent('  ');
       await arbFile.writeAsString(encoder.convert(data));
-      print('✅ Updated ${path.basename(arbFile.path)} with ${newEntries.length} new entries');
+      print(
+        '✅ Updated ${path.basename(arbFile.path)} with ${newEntries.length} new entries',
+      );
     } else {
-      print('🔍 [DRY RUN] Would update ${path.basename(arbFile.path)} with ${newEntries.length} new entries');
+      print(
+        '🔍 [DRY RUN] Would update ${path.basename(arbFile.path)} with ${newEntries.length} new entries',
+      );
     }
   }
 
   Future<void> _runFlutterGenL10n() async {
     try {
-      final result = await Process.run(
-        'flutter',
-        ['gen-l10n'],
-        workingDirectory: projectRoot,
-      );
+      final result = await Process.run('flutter', [
+        'gen-l10n',
+      ], workingDirectory: projectRoot);
 
       if (result.exitCode == 0) {
         print('✅ Successfully generated localization files!');
@@ -361,7 +402,9 @@ class L10nAutomator {
         print(result.stderr);
       }
     } catch (e) {
-      print('⚠️  Flutter command not found. Please run \'flutter gen-l10n\' manually.');
+      print(
+        '⚠️  Flutter command not found. Please run \'flutter gen-l10n\' manually.',
+      );
     }
   }
 
@@ -376,10 +419,7 @@ class StringInfo {
   final String text;
   final String originalMatch;
 
-  StringInfo({
-    required this.text,
-    required this.originalMatch,
-  });
+  StringInfo({required this.text, required this.originalMatch});
 }
 
 class StringReplacement {
