@@ -167,24 +167,25 @@ class L10nAutomator {
   }
 
   Future<Map<File, List<StringInfo>>> _scanProject() async {
-    final results = <File, List<StringInfo>>{};
-    final libDir = Directory(path.join(projectRoot, 'lib'));
+  final results = <File, List<StringInfo>>{};
+  final libDir = Directory(path.join(projectRoot, 'lib'));
 
-    await for (final entity in Glob('**/*.dart').list(root: libDir.path)) {
-      if (entity is File) {
-        final filePath = entity.path;
-        if (!filePath.contains('.g.dart') && !filePath.contains('generated')) {
-          final strings = await _extractStringsFromFile(entity);
-          if (strings.isNotEmpty) {
-            results[entity] = strings;
-            print('📄 ${path.relative(entity.path, from: projectRoot)}: ${strings.length} strings');
-          }
+  final glob = Glob('**/*.dart');
+  await for (final entity in glob.list(root: libDir.path, followLinks: false)) {
+    if (entity is File) {
+      final filePath = entity.path;
+      if (!filePath.contains('.g.dart') && !filePath.contains('generated')) {
+        final strings = await _extractStringsFromFile(entity);
+        if (strings.isNotEmpty) {
+          results[entity] = strings;
+          print('📄 ${path.relative(entity.path, from: projectRoot)}: ${strings.length} strings');
         }
       }
     }
-
-    return results;
   }
+
+  return results;
+}
 
   Future<List<StringInfo>> _extractStringsFromFile(File dartFile) async {
     final content = await dartFile.readAsString();
