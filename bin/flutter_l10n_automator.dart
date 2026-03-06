@@ -196,9 +196,47 @@ class L10nAutomator {
   }
 
   /// Picks the best ARB key from [keys] for a given [value].
-  /// Scores each key by how many characters it shares with the
-  /// expected key (derived from value). Prefers higher score, then shorter key.
+  /// Priority: (1) key actively used in non-commented dart code,
+  ///           (2) best character-score match against expected key,
+  ///           (3) shortest key.
   String _pickBestKey(List<String> keys, String value) {
+    final usedKeys = <String>{};
+
+    try {
+      final libDir = Directory(path.join(projectRoot, 'lib'));
+      for (final entity in libDir.listSync(recursive: true, followLinks: false)) {
+        if (entity is! File || !entity.path.endsWith('.dart')) continue;
+        // Skip folders that never reference l10n keys directly
+        if (_isInSkipFolder(entity.path.toLowerCase())) continue;
+
+        String content;
+        try { content = (entity as File).readAsStringSync(); }
+        catch (_) { continue; }
+
+        for (final k in keys) {
+          if (usedKeys.contains(k)) continue; // already confirmed
+          // Match any l10n accessor: l10n!.key  l10n?.key  l10n.key
+          //                          AppLocalizations.of(ctx)!.key
+          final pattern = RegExp(r'(?:l10n[!?]?\.|AppLocalizations\.of\([^)]+\)[!?]?\.)' + RegExp.escape(k) + r'\b');
+          for (final match in pattern.allMatches(content)) {
+            final lineStart  = content.lastIndexOf('\n', match.start) + 1;
+            final linePrefix = content.substring(lineStart, match.start);
+            if (!linePrefix.trimLeft().startsWith('//')) {
+              usedKeys.add(k);
+              break;
+            }
+          }
+        }
+        // Early exit if all keys resolved
+        if (usedKeys.length == keys.length) break;
+      }
+    } catch (_) {}
+
+    // Key actively used in code wins outright
+    final activeKeys = keys.where((k) => usedKeys.contains(k)).toList();
+    if (activeKeys.length == 1) return activeKeys.first;
+
+    // Score by character similarity to expected key derived from value
     final expected = value
         .toLowerCase()
         .replaceAll(RegExp(r'[^\w\s]'), '')
@@ -215,10 +253,11 @@ class L10nAutomator {
       return matches;
     }
 
-    return keys.reduce((a, b) {
+    final candidates = activeKeys.isNotEmpty ? activeKeys : keys;
+    return candidates.reduce((a, b) {
       final sa = score(a), sb = score(b);
       if (sa != sb) return sa > sb ? a : b;
-      return a.length <= b.length ? a : b; // prefer shorter on tie
+      return a.length <= b.length ? a : b;
     });
   }
 
@@ -272,6 +311,7 @@ class L10nAutomator {
   }
 
   /// Replace all usages of [oldKeys] with [newKey] across all dart files.
+  /// Skips commented-out lines to avoid touching dead code.
   Future<void> _replaceKeysInProject(List<String> oldKeys, String newKey) async {
     final libDir = Directory(path.join(projectRoot, 'lib'));
     await for (final entity in libDir.list(recursive: true, followLinks: false)) {
@@ -282,11 +322,25 @@ class L10nAutomator {
       var changed = false;
 
       for (final old in oldKeys) {
-        // Match l10n!.oldKey  l10n?.oldKey  l10n.oldKey  AppLocalizations.of(ctx).oldKey
         final pattern = RegExp(r'(\b\w+[!?]?\.)' + RegExp.escape(old) + r'\b');
-        if (pattern.hasMatch(content)) {
-          content = content.replaceAllMapped(pattern, (m) => '${m.group(1)}$newKey');
+        // Replace occurrence by occurrence, skipping commented lines
+        var result = StringBuffer();
+        var searchFrom = 0;
+        for (final match in pattern.allMatches(content)) {
+          // Check if this line is commented out
+          final lineStart  = content.lastIndexOf('\n', match.start) + 1;
+          final linePrefix = content.substring(lineStart, match.start);
+          final isComment  = linePrefix.trimLeft().startsWith('//');
+          if (isComment) continue;
+
+          result.write(content.substring(searchFrom, match.start));
+          result.write('${match.group(1)}$newKey');
+          searchFrom = match.end;
           changed = true;
+        }
+        if (changed) {
+          result.write(content.substring(searchFrom));
+          content = result.toString();
         }
       }
 
@@ -431,9 +485,14 @@ class L10nAutomator {
 
       if (content == originalContent) continue;
 
-      // Inject l10n declaration into build methods if needed
+      // Inject l10n declaration into ACTIVE build methods only
       final buildPattern = RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+context\s*\)\s*\{');
       for (final match in buildPattern.allMatches(content).toList().reversed) {
+        // Skip commented-out build methods
+        final lineStart  = content.lastIndexOf('\n', match.start) + 1;
+        final linePrefix = content.substring(lineStart, match.start);
+        if (linePrefix.trimLeft().startsWith('//')) continue;
+
         final methodEnd  = _findMatchingBrace(content, match.end - 1);
         final methodBody = content.substring(match.start, methodEnd);
         final hasDecl    = RegExp(r'final\s+\w+\s*=\s*AppLocalizations\.of\(context\)\s*;')
@@ -836,11 +895,17 @@ class L10nAutomator {
     final varName = existingVarMatch?.group(1) ?? 'l10n';
 
     // ── find build() methods that need the declaration injected ──
+    // Only consider ACTIVE (non-commented) build methods
     final buildMethods = <_BuildMethodInfo>[];
     final buildPattern = RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+context\s*\)\s*\{');
 
     for (final match in buildPattern.allMatches(content)) {
-      final methodEnd = _findMatchingBrace(content, match.end - 1);
+      // Skip if this build() is on a commented-out line
+      final lineStart  = content.lastIndexOf('\n', match.start) + 1;
+      final linePrefix = content.substring(lineStart, match.start);
+      if (linePrefix.trimLeft().startsWith('//')) continue;
+
+      final methodEnd  = _findMatchingBrace(content, match.end - 1);
       final methodBody = content.substring(match.start, methodEnd);
 
       // VALIDATION 1 — only inject if declaration not already present
@@ -884,12 +949,14 @@ class L10nAutomator {
         final linePrefix = content.substring(lineStart, idx);
         final isComment  = linePrefix.trimLeft().startsWith('//');
 
-        // Skip if already localized in context
+        // Skip if already localized in context — including interpolated form ${AppLocalizations...}
         final alreadyLocalized =
             ctx.contains('AppLocalizations') ||
             ctx.contains('l10n!.')           ||
             ctx.contains('l10n?.')           ||
             ctx.contains('l10n.')            ||
+            ctx.contains(r'${AppLocalizations') ||
+            ctx.contains(r'${l10n')          ||
             ctx.contains(r'${');
 
         if (isComment || alreadyLocalized) {
@@ -915,6 +982,22 @@ class L10nAutomator {
           decl +
           content.substring(bm.insertPosition);
     }
+
+    // ── Fix 1: remove `const` from widget constructors that now contain l10n calls ──
+    // l10n!.key is not a compile-time constant so `const Widget(l10n!.x)` is invalid.
+    // We remove `const` from the direct parent widget call when the child contains l10n.
+    content = content.replaceAllMapped(
+      RegExp(r'\bconst\b(\s+(?:Row|Column|Padding|Center|Container|SizedBox|Text|Card|Wrap|Stack|Align|DecoratedBox|ClipRRect|Material|AnimatedContainer)\s*\()'),
+      (m) {
+        // Only strip const if the widget's content (next ~300 chars) contains l10n
+        final pos = m.start;
+        final preview = content.substring(pos, (pos + 300).clamp(0, content.length));
+        if (preview.contains('l10n!.') || preview.contains('l10n?.') || preview.contains('AppLocalizations')) {
+          return m.group(1)!; // remove 'const'
+        }
+        return m.group(0)!;
+      },
+    );
 
     // ── VALIDATION 1 ── add import only if missing
     if (!content.contains('app_localizations.dart')) {
