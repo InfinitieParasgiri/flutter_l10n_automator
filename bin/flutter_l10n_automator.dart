@@ -305,45 +305,70 @@ class L10nAutomator {
 
     print('🔗 Applying ${existingKeys.length} existing ARB keys to UI files...\n');
 
+    // Only these UI widget patterns are safe to replace.
+    // Everything else (function args, default values, map values, comments) is ignored.
+    final uiPatterns = [
+      RegExp(r'''(?:const\s+)?Text\s*\(\s*['"]([^'"$\n]+)['"]\s*[,\)]'''),
+      RegExp(r'''title\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$\n]+)['"]\s*\)'''),
+      RegExp(r'''child\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$\n]+)['"]\s*[,\)]'''),
+      RegExp(r'''hintText\s*:\s*['"]([^'"$\n]+)['"]'''),
+      RegExp(r'''labelText\s*:\s*['"]([^'"$\n]+)['"]'''),
+      RegExp(r'''helperText\s*:\s*['"]([^'"$\n]+)['"]'''),
+      RegExp(r'''errorText\s*:\s*['"]([^'"$\n]+)['"]'''),
+      RegExp(r'''tooltipMessage\s*:\s*['"]([^'"$\n]+)['"]'''),
+      RegExp(r'''\?\?\s*['"]([^'"$\n]+)['"]\s*(?=[,\)])'''),
+      RegExp(r'''(?:ElevatedButton|TextButton|OutlinedButton|FilledButton)\s*\([^)]*child\s*:\s*(?:const\s+)?Text\s*\(\s*['"]([^'"$\n]+)['"]'''),
+    ];
+
+    // Build a value→key lookup for fast matching
+    final valueToKey = <String, String>{
+      for (final e in existingKeys.entries) e.value: e.key,
+    };
+
     final libDir = Directory(path.join(projectRoot, 'lib'));
     int filesUpdated = 0;
 
     await for (final entity in libDir.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
 
+      // Skip non-UI files (same list as _scanDirectory)
+      final lp = entity.path.toLowerCase();
+      if (_isNonUiFile(lp)) continue;
+
       var content = await entity.readAsString();
       final originalContent = content;
       final replacements = <StringReplacement>[];
+      final seen = <String>{};
 
-      for (final entry in existingKeys.entries) {
-        final key   = entry.key;
-        final value = entry.value;
-
-        if (value.length < 3) continue;
-        if (_shouldSkipString(value)) continue;
-
-        // Look for this exact string hardcoded in the file (single or double quotes)
-        final escaped = RegExp.escape(value);
-        final pattern = RegExp('''['"](${escaped})['"]\s*[,\\)]''');
-
+      for (final pattern in uiPatterns) {
         for (final match in pattern.allMatches(content)) {
+          final text = match.group(1);
+          if (text == null) continue;
+          if (!valueToKey.containsKey(text)) continue;
+          if (seen.contains(text)) continue;
+
           final fullMatch = match.group(0)!;
 
-          // Skip if context is already localized
+          // Skip commented-out lines
+          final lineStart = content.lastIndexOf('\n', match.start) + 1;
+          final linePrefix = content.substring(lineStart, match.start);
+          if (linePrefix.trimLeft().startsWith('//')) continue;
+
+          // Skip if already localized in context
           final ctxStart = (match.start - 100).clamp(0, content.length);
           final ctxEnd   = (match.end + 100).clamp(0, content.length);
           final ctx = content.substring(ctxStart, ctxEnd);
-
           if (ctx.contains('AppLocalizations') ||
               ctx.contains('l10n!.')           ||
               ctx.contains('l10n?.')           ||
               ctx.contains('l10n.')            ||
               ctx.contains(r'${'))             continue;
 
+          seen.add(text);
           replacements.add(StringReplacement(
-            text: value,
+            text: text,
             originalMatch: fullMatch,
-            key: key,
+            key: valueToKey[text]!,
           ));
         }
       }
@@ -363,7 +388,7 @@ class L10nAutomator {
             .replaceAll('"${r.text}"', localized)
             .replaceAll("'${r.text}'", localized);
         content = content.replaceAll(r.originalMatch, newMatch);
-        _appliedStrings.add(r.text); // ← mark as handled so scan skips it
+        _appliedStrings.add(r.text);
         print('   🔗 ${path.relative(entity.path, from: projectRoot)}: "${_truncate(r.text, 45)}" → $varName!.${r.key}');
       }
 
@@ -392,7 +417,6 @@ class L10nAutomator {
         final importStatement = "import '$relImport';\n";
         final lastImport      = RegExp(r'^import\s+[^\n]+;$', multiLine: true)
             .allMatches(content).lastOrNull;
-
         if (lastImport != null) {
           content = content.substring(0, lastImport.end) +
               '\n$importStatement' +
@@ -413,6 +437,29 @@ class L10nAutomator {
     }
 
     print('\n✅ Applied existing ARB keys to $filesUpdated file(s)\n');
+  }
+
+  /// Returns true if the file path indicates a non-UI file that should never be touched.
+  bool _isNonUiFile(String lowerPath) {
+    const skip = [
+      '_model.dart', 'model.dart', '_models.dart', 'models.dart',
+      '_bloc.dart',  'bloc.dart',  '_cubit.dart',  'cubit.dart',
+      '_state.dart', 'state.dart', '_event.dart',  'event.dart',
+      '_provider.dart', 'provider.dart',
+      '_repository.dart', 'repository.dart',
+      '_service.dart', 'service.dart',
+      '_api.dart', 'api.dart',
+      '.g.dart', '.freezed.dart', 'generated',
+      '_response.dart', 'response.dart',
+      '_request.dart',  'request.dart',
+      '_dto.dart',      'dto.dart',
+      '_entity.dart',   'entity.dart',
+      // storage / config / utils that hold logic strings
+      'storage.dart', 'constants.dart', 'config.dart',
+      'theme.dart',   'colors.dart',    'styles.dart',
+      'extensions.dart', 'helpers.dart', 'utils.dart',
+    ];
+    return skip.any((p) => lowerPath.contains(p));
   }
 
   // ── project scanning ───────────────────────────────────────────────────────
@@ -447,30 +494,9 @@ class L10nAutomator {
   }
 
   Future<void> _scanDirectory(Directory dir, Map<File, List<StringInfo>> results) async {
-    const skipPatterns = [
-      // models
-      '_model.dart', 'model.dart', '_models.dart', 'models.dart',
-      // bloc / cubit / state / event
-      '_bloc.dart', 'bloc.dart', '_cubit.dart', 'cubit.dart',
-      '_state.dart', 'state.dart', '_event.dart', 'event.dart',
-      // data layer
-      '_provider.dart', 'provider.dart',
-      '_repository.dart', 'repository.dart',
-      '_service.dart', 'service.dart',
-      '_api.dart', 'api.dart',
-      // generated
-      '.g.dart', '.freezed.dart', 'generated',
-      // misc non-UI
-      '_response.dart', 'response.dart',
-      '_request.dart',  'request.dart',
-      '_dto.dart',      'dto.dart',
-      '_entity.dart',   'entity.dart',
-    ];
-
     await for (final entity in dir.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
-      final lp = entity.path.toLowerCase();
-      if (skipPatterns.any((p) => lp.contains(p))) continue;
+      if (_isNonUiFile(entity.path.toLowerCase())) continue;
 
       final strings = await _extractStrings(entity);
       if (strings.isNotEmpty) {
@@ -510,6 +536,11 @@ class L10nAutomator {
         if (text == null) continue;
 
         final fullMatch = match.group(0)!;
+
+        // ── skip commented-out lines ──
+        final lineStart = content.lastIndexOf('\n', match.start) + 1;
+        final linePrefix = content.substring(lineStart, match.start);
+        if (linePrefix.trimLeft().startsWith('//')) continue;
 
         // ── VALIDATION 4 ── skip anything with $ (interpolation)
         if (text.contains(r'$') || fullMatch.contains(r'${')) continue;
