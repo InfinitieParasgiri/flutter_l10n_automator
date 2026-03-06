@@ -1066,7 +1066,14 @@ class L10nAutomator {
     final backupDir = Directory(path.join(projectRoot, '.l10n_backup'));
     if (await backupDir.exists()) await backupDir.delete(recursive: true);
     await backupDir.create(recursive: true);
-    final meta = {'timestamp': DateTime.now().toIso8601String(), 'files': <String>[]};
+    // metadata tracks:
+    //   files    — existing files modified (will be restored on undo)
+    //   newFiles — new files created by automator (will be deleted on undo)
+    final meta = {
+      'timestamp': DateTime.now().toIso8601String(),
+      'files':     <String>[],
+      'newFiles':  <String>[],
+    };
     await File(path.join(backupDir.path, 'metadata.json'))
         .writeAsString(jsonEncode(meta));
     print('💾 Backup: ${backupDir.path}\n');
@@ -1075,14 +1082,36 @@ class L10nAutomator {
   Future<void> _backupFile(File file) async {
     if (dryRun) return;
     final backupDir = Directory(path.join(projectRoot, '.l10n_backup'));
-    final rel = path.relative(file.path, from: projectRoot);
+    final rel  = path.relative(file.path, from: projectRoot);
     final dest = File(path.join(backupDir.path, rel));
     await dest.parent.create(recursive: true);
-    await file.copy(dest.path);
 
     final metaFile = File(path.join(backupDir.path, 'metadata.json'));
-    final meta = jsonDecode(await metaFile.readAsString());
-    (meta['files'] as List).add(rel);
+    final meta     = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+
+    // Only back up if the file already exists (i.e. it's being modified, not created)
+    if (await file.exists()) {
+      await file.copy(dest.path);
+      final files = meta['files'] as List;
+      if (!files.contains(rel)) files.add(rel);
+    } else {
+      // File doesn't exist yet — it's new, track for deletion on undo
+      final newFiles = meta['newFiles'] as List;
+      if (!newFiles.contains(rel)) newFiles.add(rel);
+    }
+
+    await metaFile.writeAsString(jsonEncode(meta));
+  }
+
+  /// Call this when a brand-new file is created (not modified) by the automator.
+  Future<void> _trackNewFile(File file) async {
+    if (dryRun) return;
+    final backupDir = Directory(path.join(projectRoot, '.l10n_backup'));
+    final rel      = path.relative(file.path, from: projectRoot);
+    final metaFile = File(path.join(backupDir.path, 'metadata.json'));
+    final meta     = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+    final newFiles = meta['newFiles'] as List;
+    if (!newFiles.contains(rel)) newFiles.add(rel);
     await metaFile.writeAsString(jsonEncode(meta));
   }
 
