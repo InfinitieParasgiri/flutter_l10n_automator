@@ -65,6 +65,8 @@ class L10nAutomator {
   final Map<String, String> existingValues = {};
   // NEW entries discovered this run
   final Map<String, String> newEntries = {};
+  // Reverse map for newEntries: value → key (to reuse across files)
+  final Map<String, String> newEntryValues = {};
   // VALIDATION 5 — duplicate values in arb: value → list of keys that share it
   final Map<String, List<String>> arbDuplicates = {};
   // VALIDATION 5 — keys removed from arb as duplicates (kept key → removed keys)
@@ -121,14 +123,20 @@ class L10nAutomator {
       final replacements = <StringReplacement>[];
 
       for (final info in strings) {
-        // VALIDATION 2 — reuse existing arb value if already present
+        // Check existing ARB values first
         if (existingValues.containsKey(info.text)) {
           final key = existingValues[info.text]!;
-          print('   ♻️  Reuse: $key → "${_truncate(info.text, 50)}"');
+          print('   ♻️  Reuse (ARB): $key → "${_truncate(info.text, 50)}"');
+          replacements.add(StringReplacement(text: info.text, originalMatch: info.originalMatch, key: key));
+        // Then check values already added THIS run (same string in multiple files)
+        } else if (newEntryValues.containsKey(info.text)) {
+          final key = newEntryValues[info.text]!;
+          print('   ♻️  Reuse (new): $key → "${_truncate(info.text, 50)}"');
           replacements.add(StringReplacement(text: info.text, originalMatch: info.originalMatch, key: key));
         } else {
           final key = _generateKey(info.text);
           newEntries[key] = info.text;
+          newEntryValues[info.text] = key; // register for cross-file reuse
           print('   ➕ New:   $key → "${_truncate(info.text, 50)}"');
           replacements.add(StringReplacement(text: info.text, originalMatch: info.originalMatch, key: key));
         }
@@ -381,13 +389,42 @@ class L10nAutomator {
               .firstMatch(content);
       final varName = existingVarMatch?.group(1) ?? 'l10n';
 
-      // Apply replacements
+      // Apply replacements — per occurrence so already-localized ones are skipped
       for (final r in replacements) {
         final localized = '$varName!.${r.key}';
         final newMatch  = r.originalMatch
             .replaceAll('"${r.text}"', localized)
             .replaceAll("'${r.text}'", localized);
-        content = content.replaceAll(r.originalMatch, newMatch);
+
+        var searchFrom = 0;
+        while (true) {
+          final idx = content.indexOf(r.originalMatch, searchFrom);
+          if (idx == -1) break;
+
+          final lineStart  = content.lastIndexOf('\n', idx) + 1;
+          final linePrefix = content.substring(lineStart, idx);
+          final isComment  = linePrefix.trimLeft().startsWith('//');
+
+          final ctxStart = (idx - 120).clamp(0, content.length);
+          final ctxEnd   = (idx + r.originalMatch.length + 120).clamp(0, content.length);
+          final ctx      = content.substring(ctxStart, ctxEnd);
+          final alreadyLocalized =
+              ctx.contains('AppLocalizations') ||
+              ctx.contains('l10n!.')           ||
+              ctx.contains('l10n?.')           ||
+              ctx.contains('l10n.')            ||
+              ctx.contains(r'${');
+
+          if (isComment || alreadyLocalized) {
+            searchFrom = idx + r.originalMatch.length;
+            continue;
+          }
+
+          content = content.substring(0, idx) +
+              newMatch +
+              content.substring(idx + r.originalMatch.length);
+          searchFrom = idx + newMatch.length;
+        }
         _appliedStrings.add(r.text);
         print('   🔗 ${path.relative(entity.path, from: projectRoot)}: "${_truncate(r.text, 45)}" → $varName!.${r.key}');
       }
@@ -752,8 +789,10 @@ class L10nAutomator {
   // ── key generation ─────────────────────────────────────────────────────────
 
   String _generateKey(String text) {
-    // VALIDATION 2 — if value already exists, reuse key
+    // Already in ARB
     if (existingValues.containsKey(text)) return existingValues[text]!;
+    // Already created this run
+    if (newEntryValues.containsKey(text)) return newEntryValues[text]!;
 
     // VALIDATION 3 — make key from first 4 meaningful words max
     var key = text
@@ -823,28 +862,48 @@ class L10nAutomator {
           .compareTo(content.lastIndexOf(a.originalMatch)));
 
     for (final r in sortedReplacements) {
-      // VALIDATION 4 — double-check: skip if match context has $ or l10n
-      final idx = content.lastIndexOf(r.originalMatch);
-      if (idx == -1) continue;
-
-      final ctxStart = (idx - 80).clamp(0, content.length);
-      final ctxEnd   = (idx + r.originalMatch.length + 80).clamp(0, content.length);
-      final ctx = content.substring(ctxStart, ctxEnd);
-
-      if (ctx.contains('AppLocalizations') ||
-          ctx.contains('l10n!.')           ||
-          ctx.contains('l10n?.')           ||
-          ctx.contains(r'${')) {
-        print('   ⏭️  Skipping already-localized: ${_truncate(r.text, 50)}');
-        continue;
-      }
-
       final localized = '$varName!.${r.key}';
       final newMatch = r.originalMatch
           .replaceAll('"${r.text}"', localized)
           .replaceAll("'${r.text}'", localized);
 
-      content = content.replaceAll(r.originalMatch, newMatch);
+      // Replace each occurrence individually so we can context-check each one.
+      // A global replaceAll would blindly replace even already-localized occurrences.
+      var searchFrom = 0;
+      while (true) {
+        final idx = content.indexOf(r.originalMatch, searchFrom);
+        if (idx == -1) break;
+
+        // Check this specific occurrence's context
+        final ctxStart = (idx - 120).clamp(0, content.length);
+        final ctxEnd   = (idx + r.originalMatch.length + 120).clamp(0, content.length);
+        final ctx      = content.substring(ctxStart, ctxEnd);
+
+        // Skip if this occurrence is on a commented line
+        final lineStart  = content.lastIndexOf('\n', idx) + 1;
+        final linePrefix = content.substring(lineStart, idx);
+        final isComment  = linePrefix.trimLeft().startsWith('//');
+
+        // Skip if already localized in context
+        final alreadyLocalized =
+            ctx.contains('AppLocalizations') ||
+            ctx.contains('l10n!.')           ||
+            ctx.contains('l10n?.')           ||
+            ctx.contains('l10n.')            ||
+            ctx.contains(r'${');
+
+        if (isComment || alreadyLocalized) {
+          print('   ⏭️  Skipping already-localized: ${_truncate(r.text, 50)}');
+          searchFrom = idx + r.originalMatch.length; // move past this occurrence
+          continue;
+        }
+
+        // Safe to replace this occurrence
+        content = content.substring(0, idx) +
+            newMatch +
+            content.substring(idx + r.originalMatch.length);
+        searchFrom = idx + newMatch.length; // advance past the replacement
+      }
     }
 
     if (content == originalContent) return; // nothing changed
