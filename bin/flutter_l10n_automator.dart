@@ -268,6 +268,7 @@ class L10nAutomator {
     final libDir = Directory(path.join(projectRoot, 'lib'));
     await for (final entity in libDir.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
+      if (_isInSkipFolder(entity.path.toLowerCase())) continue;
 
       var content = await entity.readAsString();
       var changed = false;
@@ -331,9 +332,8 @@ class L10nAutomator {
     await for (final entity in libDir.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
 
-      // Skip non-UI files (same list as _scanDirectory)
-      final lp = entity.path.toLowerCase();
-      if (_isNonUiFile(lp)) continue;
+      // Skip non-UI files using two-stage check
+      if (await _shouldSkipFile(entity)) continue;
 
       var content = await entity.readAsString();
       final originalContent = content;
@@ -439,9 +439,140 @@ class L10nAutomator {
     print('\n✅ Applied existing ARB keys to $filesUpdated file(s)\n');
   }
 
-  /// Returns true if the file path indicates a non-UI file that should never be touched.
-  bool _isNonUiFile(String lowerPath) {
+  /// Stage 0 — folder-level hard skip.
+  /// If the file lives inside any of these folders, skip it entirely
+  /// regardless of content. These folders are pure state management / data layer.
+  bool _isInSkipFolder(String lowerPath) {
+    const skipFolders = [
+      '/bloc/',
+      '/blocs/',
+      '/cubit/',
+      '/cubits/',
+      '/state/',
+      '/states/',
+      '/event/',
+      '/events/',
+      '/model/',
+      '/models/',
+      '/repository/',
+      '/repositories/',
+      '/repo/',
+      '/repos/',
+      '/provider/',
+      '/providers/',
+      '/service/',
+      '/services/',
+      '/api/',
+      '/datasource/',
+      '/datasources/',
+      '/data_source/',
+      '/network/',
+      '/remote/',
+      '/local/',
+      '/cache/',
+      '/db/',
+      '/database/',
+      '/mapper/',
+      '/mappers/',
+      // top-level Model folder (capital M handled by lowercase)
+      '/model',
+    ];
+    return skipFolders.any((folder) => lowerPath.contains(folder));
+  }
+
+  /// Stage 1 — filename hard-skip list.
+  /// These files are NEVER UI regardless of content (generated, pure data, etc.)
+  bool _isHardSkipFile(String lowerPath) {
     const skip = [
+      // generated
+      '.g.dart', '.freezed.dart', 'generated',
+      // pure data transfer
+      '_dto.dart', 'dto.dart',
+      '_entity.dart', 'entity.dart',
+      '_response.dart', 'response.dart',
+      '_request.dart',  'request.dart',
+      // non-UI config
+      'constants.dart', 'colors.dart', 'theme.dart',
+      'styles.dart', 'extensions.dart',
+    ];
+    return skip.any((p) => lowerPath.contains(p));
+  }
+
+  /// Stage 2 — content-based UI detection.
+  /// Returns true if the file actually renders Flutter UI widgets,
+  /// meaning it should be processed for localization regardless of filename.
+  ///
+  /// This catches:
+  ///  • Reusable widgets in widget files
+  ///  • Lists/arrays of DropdownMenuItem, Tab, PopupMenuItem etc.
+  ///  • StatelessWidget / StatefulWidget subclasses anywhere
+  ///  • Files with Text(), hintText:, labelText: etc. even in blocs/models
+  bool _containsUiRendering(String content) {
+    // Flutter widget indicators — if ANY of these exist the file renders UI
+    const uiSignatures = [
+      'StatelessWidget',
+      'StatefulWidget',
+      'State<',
+      'Widget build(',
+      'BuildContext',
+      'Text(',
+      'hintText:',
+      'labelText:',
+      'helperText:',
+      'errorText:',
+      'DropdownMenuItem(',
+      'DropdownButtonFormField(',
+      'PopupMenuItem(',
+      'Tab(',
+      'ListTile(',
+      'BottomNavigationBarItem(',
+      'NavigationDestination(',
+      'Chip(',
+      'SnackBar(',
+      'AlertDialog(',
+      'SimpleDialog(',
+      'showDialog(',
+      'showSnackBar(',
+      'showModalBottomSheet(',
+      'ScaffoldMessenger',
+      'ElevatedButton(',
+      'TextButton(',
+      'OutlinedButton(',
+      'FilledButton(',
+      'IconButton(',
+      'FloatingActionButton(',
+      'AppBar(',
+      'SliverAppBar(',
+      'Scaffold(',
+      'Column(',
+      'Row(',
+      'Container(',
+      'Padding(',
+      'Card(',
+      'InkWell(',
+      'GestureDetector(',
+      'Expanded(',
+      'Flexible(',
+    ];
+    return uiSignatures.any((sig) => content.contains(sig));
+  }
+
+  /// Combined file check used by both scan and apply phases.
+  /// Returns true if the file should be SKIPPED (not processed).
+  Future<bool> _shouldSkipFile(File file) async {
+    final lowerPath = file.path.toLowerCase();
+
+    // Stage 0 — skip entire state management / data layer folders
+    if (_isInSkipFolder(lowerPath)) return true;
+
+    // Hard skip — never process these file types
+    if (_isHardSkipFile(lowerPath)) return true;
+
+    // For files with suspicious names (bloc, model, service etc.)
+    // read the content and check if they actually render UI widgets.
+    // If they do (e.g. a bloc that builds a SnackBar, a model with a widget list),
+    // we still process them.
+    const suspectPatterns = [
       '_model.dart', 'model.dart', '_models.dart', 'models.dart',
       '_bloc.dart',  'bloc.dart',  '_cubit.dart',  'cubit.dart',
       '_state.dart', 'state.dart', '_event.dart',  'event.dart',
@@ -449,17 +580,24 @@ class L10nAutomator {
       '_repository.dart', 'repository.dart',
       '_service.dart', 'service.dart',
       '_api.dart', 'api.dart',
-      '.g.dart', '.freezed.dart', 'generated',
-      '_response.dart', 'response.dart',
-      '_request.dart',  'request.dart',
-      '_dto.dart',      'dto.dart',
-      '_entity.dart',   'entity.dart',
-      // storage / config / utils that hold logic strings
-      'storage.dart', 'constants.dart', 'config.dart',
-      'theme.dart',   'colors.dart',    'styles.dart',
-      'extensions.dart', 'helpers.dart', 'utils.dart',
+      'storage.dart', 'config.dart',
+      'helpers.dart', 'utils.dart',
     ];
-    return skip.any((p) => lowerPath.contains(p));
+
+    final isSuspect = suspectPatterns.any((p) => lowerPath.contains(p));
+    if (!isSuspect) return false; // normal view/widget/page file — always process
+
+    // Suspect file — read content and decide based on what's actually inside
+    final content = await file.readAsString();
+    final hasUi = _containsUiRendering(content);
+
+    if (!hasUi) {
+      return true; // purely logic/data — skip
+    }
+
+    // File has suspicious name BUT contains UI rendering — process it
+    print('   🔎 Reusable UI detected in: ${path.relative(file.path, from: projectRoot)}');
+    return false;
   }
 
   // ── project scanning ───────────────────────────────────────────────────────
@@ -496,7 +634,7 @@ class L10nAutomator {
   Future<void> _scanDirectory(Directory dir, Map<File, List<StringInfo>> results) async {
     await for (final entity in dir.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
-      if (_isNonUiFile(entity.path.toLowerCase())) continue;
+      if (await _shouldSkipFile(entity)) continue;
 
       final strings = await _extractStrings(entity);
       if (strings.isNotEmpty) {
