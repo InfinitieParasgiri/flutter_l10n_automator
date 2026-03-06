@@ -65,6 +65,10 @@ class L10nAutomator {
   final Map<String, String> existingValues = {};
   // NEW entries discovered this run
   final Map<String, String> newEntries = {};
+  // VALIDATION 5 — duplicate values in arb: value → list of keys that share it
+  final Map<String, List<String>> arbDuplicates = {};
+  // VALIDATION 5 — keys removed from arb as duplicates (kept key → removed keys)
+  final Map<String, List<String>> removedDuplicateKeys = {};
 
   L10nAutomator({
     required this.projectRoot,
@@ -91,7 +95,14 @@ class L10nAutomator {
     await _loadExistingArb(arbFile);
     print('📚 Loaded ${existingKeys.length} existing keys\n');
 
+    // VALIDATION 5 — deduplicate arb BEFORE scanning so reverse map is clean
+    await _deduplicateArbFile(arbFile);
+
     print('🔍 Scanning Flutter project for hardcoded strings...\n');
+
+    // VALIDATION 5 — replace any hardcoded strings that already exist in arb
+    await _applyExistingArbToProject();
+
     final scanResults = await _scanProject();
 
     if (scanResults.isEmpty) {
@@ -140,9 +151,10 @@ class L10nAutomator {
     }
 
     print('\n${'=' * 50}\n📈 SUMMARY');
-    print('   • Files processed : ${scanResults.length}');
-    print('   • New keys added  : ${newEntries.length}');
-    print('   • Total arb keys  : ${existingKeys.length + newEntries.length}');
+    print('   • Files processed       : ${scanResults.length}');
+    print('   • New keys added        : ${newEntries.length}');
+    print('   • ARB duplicates removed: ${removedDuplicateKeys.values.fold(0, (s, l) => s + l.length)}');
+    print('   • Total arb keys        : ${existingKeys.length + newEntries.length}');
     print('${'=' * 50}\n✨ Done!\n');
   }
 
@@ -150,12 +162,221 @@ class L10nAutomator {
 
   Future<void> _loadExistingArb(File arbFile) async {
     final data = jsonDecode(await arbFile.readAsString()) as Map<String, dynamic>;
+
+    // Track all keys per value to detect duplicates
+    final valueToKeys = <String, List<String>>{};
+
     for (final e in data.entries) {
       if (!e.key.startsWith('@')) {
         existingKeys[e.key] = e.value.toString();
-        existingValues[e.value.toString()] = e.key;
+        valueToKeys.putIfAbsent(e.value.toString(), () => []).add(e.key);
       }
     }
+
+    // Build reverse map using the FIRST (canonical) key for each value
+    for (final e in valueToKeys.entries) {
+      existingValues[e.key] = e.value.first; // canonical key
+      if (e.value.length > 1) {
+        arbDuplicates[e.key] = e.value; // value → [key1, key2, ...]
+      }
+    }
+  }
+
+  // ── VALIDATION 5a — remove duplicate values from arb file ─────────────────
+  // Keeps the FIRST key for each value, removes the rest, and rewrites all
+  // dart files that used the removed keys to point at the canonical key.
+
+  Future<void> _deduplicateArbFile(File arbFile) async {
+    if (arbDuplicates.isEmpty) {
+      print('✅ ARB file has no duplicate values\n');
+      return;
+    }
+
+    print('🧹 Found ${arbDuplicates.length} duplicate value(s) in ARB — cleaning up...');
+
+    for (final e in arbDuplicates.entries) {
+      final value      = e.key;
+      final allKeys    = e.value;           // [canonical, dup1, dup2, ...]
+      final canonical  = allKeys.first;
+      final dupeKeys   = allKeys.sublist(1);
+
+      removedDuplicateKeys[canonical] = dupeKeys;
+
+      print('   🔁 "$value"');
+      print('      Keep    : $canonical');
+      print('      Remove  : ${dupeKeys.join(', ')}');
+
+      // Rewrite dart files that reference the duplicate keys
+      await _replaceKeysInProject(dupeKeys, canonical);
+    }
+
+    // Rewrite arb without the duplicate keys
+    await _backupFile(arbFile);
+    final data = jsonDecode(await arbFile.readAsString()) as Map<String, dynamic>;
+
+    for (final dupes in removedDuplicateKeys.values) {
+      for (final dk in dupes) {
+        data.remove(dk);
+        data.remove('@$dk'); // also remove metadata entry if present
+        existingKeys.remove(dk);
+      }
+    }
+
+    if (!dryRun) {
+      await arbFile.writeAsString(JsonEncoder.withIndent('  ').convert(data));
+      final totalRemoved = removedDuplicateKeys.values.fold(0, (s, l) => s + l.length);
+      print('✅ Removed $totalRemoved duplicate key(s) from ${path.basename(arbFile.path)}\n');
+    } else {
+      print('🔍 [DRY RUN] Would remove duplicate keys from ARB\n');
+    }
+  }
+
+  /// Replace all usages of [oldKeys] with [newKey] across all dart files.
+  Future<void> _replaceKeysInProject(List<String> oldKeys, String newKey) async {
+    final libDir = Directory(path.join(projectRoot, 'lib'));
+    await for (final entity in libDir.list(recursive: true, followLinks: false)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+
+      var content = await entity.readAsString();
+      var changed = false;
+
+      for (final old in oldKeys) {
+        // Match l10n!.oldKey  l10n?.oldKey  l10n.oldKey  AppLocalizations.of(ctx).oldKey
+        final pattern = RegExp(r'(\b\w+[!?]?\.)' + RegExp.escape(old) + r'\b');
+        if (pattern.hasMatch(content)) {
+          content = content.replaceAllMapped(pattern, (m) => '${m.group(1)}$newKey');
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        if (!dryRun) {
+          await _backupFile(entity);
+          await entity.writeAsString(content);
+          print('      ✅ Updated refs in: ${path.relative(entity.path, from: projectRoot)}');
+        } else {
+          print('      🔍 [DRY RUN] Would update: ${path.relative(entity.path, from: projectRoot)}');
+        }
+      }
+    }
+  }
+
+  // ── VALIDATION 5b — apply existing arb keys directly into dart UI files ───
+  // Scans all dart files for hardcoded strings that ALREADY exist in the arb,
+  // and replaces them with the l10n reference — without adding any new keys.
+
+  Future<void> _applyExistingArbToProject() async {
+    if (existingKeys.isEmpty) return;
+
+    print('🔗 Applying ${existingKeys.length} existing ARB keys to UI files...\n');
+
+    final libDir = Directory(path.join(projectRoot, 'lib'));
+    int filesUpdated = 0;
+
+    await for (final entity in libDir.list(recursive: true, followLinks: false)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+
+      var content = await entity.readAsString();
+      final originalContent = content;
+      final replacements = <StringReplacement>[];
+
+      for (final entry in existingKeys.entries) {
+        final key   = entry.key;
+        final value = entry.value;
+
+        if (value.length < 3) continue;
+        if (_shouldSkipString(value)) continue;
+
+        // Look for this exact string hardcoded in the file (single or double quotes)
+        final escaped = RegExp.escape(value);
+        final pattern = RegExp('''['"](${escaped})['"]\s*[,\\)]''');
+
+        for (final match in pattern.allMatches(content)) {
+          final fullMatch = match.group(0)!;
+
+          // Skip if context is already localized
+          final ctxStart = (match.start - 100).clamp(0, content.length);
+          final ctxEnd   = (match.end + 100).clamp(0, content.length);
+          final ctx = content.substring(ctxStart, ctxEnd);
+
+          if (ctx.contains('AppLocalizations') ||
+              ctx.contains('l10n!.')           ||
+              ctx.contains('l10n?.')           ||
+              ctx.contains('l10n.')            ||
+              ctx.contains(r'${'))             continue;
+
+          replacements.add(StringReplacement(
+            text: value,
+            originalMatch: fullMatch,
+            key: key,
+          ));
+        }
+      }
+
+      if (replacements.isEmpty) continue;
+
+      // Detect or default var name
+      final existingVarMatch =
+          RegExp(r'final\s+(\w+)\s*=\s*AppLocalizations\.of\(context\)\s*;')
+              .firstMatch(content);
+      final varName = existingVarMatch?.group(1) ?? 'l10n';
+
+      // Apply replacements
+      for (final r in replacements) {
+        final localized = '$varName!.${r.key}';
+        final newMatch  = r.originalMatch
+            .replaceAll('"${r.text}"', localized)
+            .replaceAll("'${r.text}'", localized);
+        content = content.replaceAll(r.originalMatch, newMatch);
+        print('   🔗 ${path.relative(entity.path, from: projectRoot)}: "${_truncate(r.text, 45)}" → $varName!.${r.key}');
+      }
+
+      if (content == originalContent) continue;
+
+      // Inject l10n declaration into build methods if needed
+      final buildPattern = RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+context\s*\)\s*\{');
+      for (final match in buildPattern.allMatches(content).toList().reversed) {
+        final methodEnd  = _findMatchingBrace(content, match.end - 1);
+        final methodBody = content.substring(match.start, methodEnd);
+        final hasDecl    = RegExp(r'final\s+\w+\s*=\s*AppLocalizations\.of\(context\)\s*;')
+            .hasMatch(methodBody);
+        if (hasDecl) continue;
+
+        var insertPos = match.end;
+        while (insertPos < content.length && ' \n\t'.contains(content[insertPos])) {
+          insertPos++;
+        }
+        final decl = '\n    final $varName = AppLocalizations.of(context);\n';
+        content = content.substring(0, insertPos) + decl + content.substring(insertPos);
+      }
+
+      // Add import if missing
+      if (!content.contains('app_localizations.dart')) {
+        final relImport       = _resolveImportPath(entity);
+        final importStatement = "import '$relImport';\n";
+        final lastImport      = RegExp(r'^import\s+[^\n]+;$', multiLine: true)
+            .allMatches(content).lastOrNull;
+
+        if (lastImport != null) {
+          content = content.substring(0, lastImport.end) +
+              '\n$importStatement' +
+              content.substring(lastImport.end);
+        } else {
+          content = '$importStatement\n$content';
+        }
+      }
+
+      if (!dryRun) {
+        await _backupFile(entity);
+        await entity.writeAsString(content);
+        filesUpdated++;
+      } else {
+        print('🔍 [DRY RUN] Would apply existing keys to: ${path.relative(entity.path, from: projectRoot)}');
+        filesUpdated++;
+      }
+    }
+
+    print('\n✅ Applied existing ARB keys to $filesUpdated file(s)\n');
   }
 
   // ── project scanning ───────────────────────────────────────────────────────
