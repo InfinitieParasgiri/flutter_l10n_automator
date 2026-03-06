@@ -173,13 +173,45 @@ class L10nAutomator {
       }
     }
 
-    // Build reverse map using the FIRST (canonical) key for each value
+    // Build reverse map — pick the BEST canonical key for each value.
+    // Prefer the key whose text most closely matches the value words,
+    // avoiding obvious typos. Falls back to shortest key.
     for (final e in valueToKeys.entries) {
-      existingValues[e.key] = e.value.first; // canonical key
-      if (e.value.length > 1) {
-        arbDuplicates[e.key] = e.value; // value → [key1, key2, ...]
+      final keys = e.value;
+      final canonical = keys.length == 1 ? keys.first : _pickBestKey(keys, e.key);
+      existingValues[e.key] = canonical;
+      if (keys.length > 1) {
+        final others = keys.where((k) => k != canonical).toList();
+        arbDuplicates[e.key] = [canonical, ...others];
       }
     }
+  }
+
+  /// Picks the best ARB key from [keys] for a given [value].
+  /// Scores each key by how many characters it shares with the
+  /// expected key (derived from value). Prefers higher score, then shorter key.
+  String _pickBestKey(List<String> keys, String value) {
+    final expected = value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\w\s]'), '')
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '');
+
+    int score(String key) {
+      final k = key.toLowerCase().replaceAll('_', '');
+      int matches = 0;
+      final minLen = k.length < expected.length ? k.length : expected.length;
+      for (int i = 0; i < minLen; i++) {
+        if (k[i] == expected[i]) matches++;
+      }
+      return matches;
+    }
+
+    return keys.reduce((a, b) {
+      final sa = score(a), sb = score(b);
+      if (sa != sb) return sa > sb ? a : b;
+      return a.length <= b.length ? a : b; // prefer shorter on tie
+    });
   }
 
   // ── VALIDATION 5a — remove duplicate values from arb file ─────────────────
@@ -261,6 +293,9 @@ class L10nAutomator {
     }
   }
 
+  // Strings already applied from ARB — normal scan must skip these
+  final Set<String> _appliedStrings = {};
+
   // ── VALIDATION 5b — apply existing arb keys directly into dart UI files ───
   // Scans all dart files for hardcoded strings that ALREADY exist in the arb,
   // and replaces them with the l10n reference — without adding any new keys.
@@ -328,6 +363,7 @@ class L10nAutomator {
             .replaceAll('"${r.text}"', localized)
             .replaceAll("'${r.text}'", localized);
         content = content.replaceAll(r.originalMatch, newMatch);
+        _appliedStrings.add(r.text); // ← mark as handled so scan skips it
         print('   🔗 ${path.relative(entity.path, from: projectRoot)}: "${_truncate(r.text, 45)}" → $varName!.${r.key}');
       }
 
@@ -412,15 +448,23 @@ class L10nAutomator {
 
   Future<void> _scanDirectory(Directory dir, Map<File, List<StringInfo>> results) async {
     const skipPatterns = [
-      '_model.dart', 'model.dart',
-      '_bloc.dart',  'bloc.dart',
-      '_cubit.dart', 'cubit.dart',
+      // models
+      '_model.dart', 'model.dart', '_models.dart', 'models.dart',
+      // bloc / cubit / state / event
+      '_bloc.dart', 'bloc.dart', '_cubit.dart', 'cubit.dart',
+      '_state.dart', 'state.dart', '_event.dart', 'event.dart',
+      // data layer
       '_provider.dart', 'provider.dart',
       '_repository.dart', 'repository.dart',
       '_service.dart', 'service.dart',
       '_api.dart', 'api.dart',
-      '.g.dart', '.freezed.dart',
-      'generated',
+      // generated
+      '.g.dart', '.freezed.dart', 'generated',
+      // misc non-UI
+      '_response.dart', 'response.dart',
+      '_request.dart',  'request.dart',
+      '_dto.dart',      'dto.dart',
+      '_entity.dart',   'entity.dart',
     ];
 
     await for (final entity in dir.list(recursive: true, followLinks: false)) {
@@ -483,6 +527,9 @@ class L10nAutomator {
 
         // ── basic quality filters ──
         if (_shouldSkipString(text)) continue;
+
+        // skip if already applied from existing ARB in phase 5b
+        if (_appliedStrings.contains(text)) continue;
 
         // deduplicate within the same file
         if (seen.contains(text)) continue;
